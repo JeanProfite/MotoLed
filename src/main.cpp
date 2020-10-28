@@ -1,10 +1,10 @@
 #include "FastLED.h"
-#include <Wifi.h>
-#include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
-#include <ESPAsyncWebServer.h>
-#include <SPIFFS.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #define NUM_LEDS 60 //Nombre de leds 88
 #define DATA_PIN 19  //Numéro du pin de données
 #define LUM 255 //Luminosité [0;255]
@@ -21,10 +21,56 @@ float Vstop =0;
 float VclignoD =0;
 float VclignoG =0;
 bool strob=0;
-const char* ssid = "NC700S";
-const char* password = "password";
 
-AsyncWebServer server(80);
+//----------------------------------------------------BLE
+int16_t value = 0;  //the set value function only accepts unsigned 8 bit integers
+int16_t value2 = 0;
+int16_t value3 = 0;
+
+bool deviceConnected = false;
+
+void BLETransfer(int16_t);
+
+#define ServiceUUID "c9a110ba-7f3e-4165-847c-17f92e4ee6b3"
+  #define DescriptorUUID BLEUUID((uint16_t)0x2901)
+  
+  #define temperatureCharacteristicUUID BLEUUID((uint16_t)0x2A6E)
+  #define humidityCharacteristicUUID BLEUUID((uint16_t)0x2A6F)
+  #define pressureCharacteristicUUID BLEUUID((uint16_t)0x2A6D)
+//-----------------------------------------------------------------------
+BLECharacteristic temperatureCharacteristic(
+  temperatureCharacteristicUUID, 
+  BLECharacteristic::PROPERTY_READ | 
+  BLECharacteristic::PROPERTY_NOTIFY
+);
+BLECharacteristic humidityCharacteristic(
+  humidityCharacteristicUUID, 
+  BLECharacteristic::PROPERTY_READ | 
+  BLECharacteristic::PROPERTY_NOTIFY
+);
+BLECharacteristic pressureCharacteristic(
+  pressureCharacteristicUUID, 
+  BLECharacteristic::PROPERTY_READ | 
+  BLECharacteristic::PROPERTY_NOTIFY
+);
+BLEDescriptor tempDescriptor(DescriptorUUID);
+BLEDescriptor humDescriptor(DescriptorUUID);
+BLEDescriptor pressureDescriptor(DescriptorUUID);
+
+//-----------------------------------------------------------------------
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+//----------------------------------------------------
+
 
 Adafruit_BME280 bme;
 unsigned long delayTime;
@@ -41,100 +87,48 @@ void setup() {
 //----------------------------------------------------Serial
 Serial.begin(115200);
 Serial.println("\n");
-//----------------------------------------------------SPIFFS
-if(!SPIFFS.begin()){
-  Serial.println("Erreur SPIFFS...");
-  return;
-}
+//----------------------------------------------------BLE
+ // Create the BLE Device
+  BLEDevice::init("ESP");
 
-File root = SPIFFS.open("/");
-File file = root.openNextFile();
+  // Create the BLE Server
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
 
-while(file)
-{
-   Serial.print("File: ");
-   Serial.println(file.name());
-   file.close();
-   file = root.openNextFile();
- }
-//----------------------------------------------------WIFI
-Serial.println("\n");
-Serial.println("Creation du point d'acces...");
-WiFi.softAP(ssid,password);
-Serial.print("Adresse IP: ");
-Serial.println(WiFi.softAPIP());
-//----------------------------------------------------SERVER
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    request->send(SPIFFS, "/index.html", "text/html");
-  });
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(ServiceUUID);
 
-  server.on("/w3.css", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    request->send(SPIFFS, "/w3.css", "text/css");
-  });
+  // Create a BLE Characteristic
+  //-----------------------------------------------------------------------
+  pService->addCharacteristic(&temperatureCharacteristic);
+  pService->addCharacteristic(&humidityCharacteristic);
+  pService->addCharacteristic(&pressureCharacteristic);
 
-  server.on("/script.js", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    request->send(SPIFFS, "/script.js", "text/javascript");
-  });
+  //-----------------------------------------------------------------------
+  // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.descriptor.gatt.client_characteristic_configuration.xml
+  // Create a BLE Descriptor
+  //-----------------------------------------------------------------------
+  tempDescriptor.setValue("Temperature -40-60°C");
+  temperatureCharacteristic.addDescriptor(&tempDescriptor);
+  temperatureCharacteristic.addDescriptor(new BLE2902());
 
-  server.on("/lireTemperature", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    float val = temper;
-    String temperature = String(val);
-    request->send(200, "text/plain", temperature);
-  });
+  humDescriptor.setValue("Humidity 0-100%");
+  humidityCharacteristic.addDescriptor(&humDescriptor);
+  humidityCharacteristic.addDescriptor(new BLE2902());
 
-    server.on("/lireHumidite", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    float val = hum;
-    String Shum = String(val);
-    request->send(200, "text/plain", Shum);
-  });
+  pressureDescriptor.setValue("Pression ATM (Pa)");
+  pressureCharacteristic.addDescriptor(&pressureDescriptor);
+  pressureCharacteristic.addDescriptor(new BLE2902());
+  //-----------------------------------------------------------------------
+  pServer->getAdvertising()->addServiceUUID(ServiceUUID);
 
-      server.on("/lirePression", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    float val = press;
-    String Spress = String(val);
-    request->send(200, "text/plain", Spress);
-  });
+  // Start the service
+  pService->start();
 
-  server.on("/lireStop", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    float val = Vstop;
-    String SVstop = String(val);
-    request->send(200, "text/plain", SVstop);
-  });
+  // Start advertising
+  pServer->getAdvertising()->start();
 
-  server.on("/lireClignoG", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    float val = VclignoG;
-    String SVclignoG = String(val);
-    request->send(200, "text/plain", SVclignoG);
-  });
-
-    server.on("/lireClignoD", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    float val = VclignoD;
-    String SVclignoD = String(val);
-    request->send(200, "text/plain", SVclignoD);
-  });
-
-  server.on("/on", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    strob=1;
-    request->send(200);
-  });
-
-  server.on("/off", HTTP_GET, [](AsyncWebServerRequest *request)
-  {
-    strob=0;
-    request->send(200);
-  });
-
-  server.begin();
-  Serial.println("Serveur actif!");
+  Serial.println("Waiting for a Client to connect...");
 //----------------------------------------------------BME280
 bool status;
 status = bme.begin(0x76); 
@@ -163,6 +157,24 @@ for (int i=0; i <= 255-Rp; i++){
 
 void loop() {
   majBME();
+
+float t = random(3500);
+float h = random(5600);
+float p = random(200);
+value = t;
+value2 = h;
+value3 = p;
+
+if (deviceConnected) {
+/* Set the value */
+  temperatureCharacteristic.setValue((uint8_t*)&value,2);  // This is a value of a single byte
+  temperatureCharacteristic.notify();  // Notify the client of a change
+  humidityCharacteristic.setValue((uint8_t*)&value2,2);  // This is a value of a single byte
+  humidityCharacteristic.notify();  // Notify the client of a change
+  pressureCharacteristic.setValue((uint8_t*)&value3,2);  // This is a value of a single byte
+  pressureCharacteristic.notify();  // Notify the client of a change
+}
+
   //Lecture des tensions
    float v0 = (analogRead(Stop_PIN) * vPow) / 1024.0;
   Vstop = v0 / (r2 / (r1 + r2));
