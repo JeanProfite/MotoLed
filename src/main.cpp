@@ -157,13 +157,9 @@ for (int i=0; i <= 255-Rp; i++){
 
 void loop() {
   majBME();
-
-float t = random(3500);
-float h = random(5600);
-float p = random(200);
-value = t;
-value2 = h;
-value3 = p;
+value = temper;
+value2 = hum;
+value3 = press;
 
 if (deviceConnected) {
 /* Set the value */
