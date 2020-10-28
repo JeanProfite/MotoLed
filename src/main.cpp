@@ -157,8 +157,8 @@ for (int i=0; i <= 255-Rp; i++){
 
 void loop() {
   majBME();
-value = temper;
-value2 = hum;
+value = temper*100;
+value2 = hum*100;
 value3 = press;
 
 if (deviceConnected) {
