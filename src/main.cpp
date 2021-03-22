@@ -5,90 +5,114 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#define NUM_LEDS 60 //Nombre de leds 88
-#define DATA_PIN 19  //Numéro du pin de données
-#define LUM 255 //Luminosité [0;255]
-#define Rp 10 //Rouge feu position [0;255]
-#define ClignoD_PIN 34
-#define ClignoG_PIN 35
+
+#define NUM_LEDS 60     //Nombre de led 88
+#define DATA_PIN_LED 19 //Numéro du pin de données led
+#define LUM 255         //Luminosité led [0;255]
+#define Rp 10           //Intensité rouge feu position [0;255]
+#define Rs 255          //Intensité rouge feu stop [0;255]
+#define ClignoD_PIN 25
+#define ClignoG_PIN 33
 #define Stop_PIN 32
 
 CRGB leds[NUM_LEDS];
-float vPow = 4.7;
-float r1 = 30000;
-float r2 = 7500;
-float Vstop =0;
-float VclignoD =0;
-float VclignoG =0;
-bool strob=0;
+float vPow = 4.7;     //Tension ADC ref
+float r1 = 30000;     //Résitance pont1 div
+float r2 = 7500;      //Résitance pont2 div
+float Vstop = 0;      //Tension courante Feu stop
+float VclignoD = 0;   //Tension courante Clignotant droit
+float VclignoG = 0;   //Tension courante Clignotant gauche
+bool strob = 0;
+int etat = 0;     //Etat courant des led
+int R = 0;        //Valeur courante rouge led
 
-//----------------------------------------------------BLE
-int16_t value = 0;  //the set value function only accepts unsigned 8 bit integers
-int16_t value2 = 0;
-int16_t value3 = 0;
-
+//----------------------------------------------------BLE-----------------------------------
 bool deviceConnected = false;
 
 void BLETransfer(int16_t);
 
 #define ServiceUUID "c9a110ba-7f3e-4165-847c-17f92e4ee6b3"
-  #define DescriptorUUID BLEUUID((uint16_t)0x2901)
-  
-  #define temperatureCharacteristicUUID BLEUUID((uint16_t)0x2A6E)
-  #define humidityCharacteristicUUID BLEUUID((uint16_t)0x2A6F)
-  #define pressureCharacteristicUUID BLEUUID((uint16_t)0x2A6D)
-//-----------------------------------------------------------------------
+#define DescriptorUUID BLEUUID((uint16_t)0x2901)
+
+#define temperatureCharacteristicUUID BLEUUID((uint16_t)0x2A6E)
+#define humidityCharacteristicUUID BLEUUID((uint16_t)0x2A6F)
+#define pressureCharacteristicUUID BLEUUID((uint16_t)0x2A6D)
+// --------------------------Characteristic definition----------------------------------------
 BLECharacteristic temperatureCharacteristic(
-  temperatureCharacteristicUUID, 
-  BLECharacteristic::PROPERTY_READ | 
-  BLECharacteristic::PROPERTY_NOTIFY
-);
+    temperatureCharacteristicUUID,
+    BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_NOTIFY);
 BLECharacteristic humidityCharacteristic(
-  humidityCharacteristicUUID, 
-  BLECharacteristic::PROPERTY_READ | 
-  BLECharacteristic::PROPERTY_NOTIFY
-);
+    humidityCharacteristicUUID,
+    BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_NOTIFY);
 BLECharacteristic pressureCharacteristic(
-  pressureCharacteristicUUID, 
-  BLECharacteristic::PROPERTY_READ | 
-  BLECharacteristic::PROPERTY_NOTIFY
-);
+    pressureCharacteristicUUID,
+    BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_NOTIFY);
 BLEDescriptor tempDescriptor(DescriptorUUID);
 BLEDescriptor humDescriptor(DescriptorUUID);
 BLEDescriptor pressureDescriptor(DescriptorUUID);
 
-//-----------------------------------------------------------------------
+//----------------------------BLE Callbacks------------------------------------
 
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-    };
+class MyServerCallbacks : public BLEServerCallbacks
+{
+  void onConnect(BLEServer *pServer)
+  {
+    deviceConnected = true;
+    Serial.println("Device connected");
+  };
 
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-    }
+  void onDisconnect(BLEServer *pServer)
+  {
+    deviceConnected = false;
+    Serial.println("Device disconnected");
+  }
 };
 
 //----------------------------------------------------
 
-
 Adafruit_BME280 bme;
 unsigned long delayTime;
-float temper=0,hum=0,press=0;
+int temperature = 0, humidity = 0, pressure = 0;
 
-void majBME() {
-  temper=bme.readTemperature();
-  hum=bme.readHumidity();
-  press=bme.readPressure() / 100.0F;
+void fill_half_grad(int Half, uint8_t Red, uint8_t Green, uint8_t Blue)
+{
+  int f = 0;
+  for (int i = 0; i <= (NUM_LEDS / 2); i++)
+  {
+    f = (Half == 1) ? -1 + i : (NUM_LEDS - i);
+    leds[f] = CRGB(Green, Red, Blue);
+    FastLED.show();
+    delay(5);
+  }
+}
+//----------------------Timer-----------------------
+volatile bool flagMeas;
+hw_timer_t *timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
-} 
+void IRAM_ATTR onTime()
+{
+  portENTER_CRITICAL_ISR(&timerMux);
+  flagMeas = !flagMeas;
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
 
-void setup() { 
-//----------------------------------------------------Serial
-Serial.begin(115200);
-Serial.println("\n");
-//----------------------------------------------------BLE
- // Create the BLE Device
+void setup()
+{
+  //----------------------------------------------------Timer
+  timer = timerBegin(0, 80, true);
+  timerAttachInterrupt(timer, &onTime, true);
+  timerAlarmWrite(timer, 1000000, true);
+  timerAlarmEnable(timer);
+
+  //----------------------------------------------------Serial
+  Serial.begin(115200);
+  Serial.println("\n");
+  //----------------------------------------------------BLE
+  // Create the BLE Device
   BLEDevice::init("ESP");
 
   // Create the BLE Server
@@ -116,7 +140,7 @@ Serial.println("\n");
   humidityCharacteristic.addDescriptor(&humDescriptor);
   humidityCharacteristic.addDescriptor(new BLE2902());
 
-  pressureDescriptor.setValue("Pression ATM (Pa)");
+  pressureDescriptor.setValue("pressure ATM (Pa)");
   pressureCharacteristic.addDescriptor(&pressureDescriptor);
   pressureCharacteristic.addDescriptor(new BLE2902());
   //-----------------------------------------------------------------------
@@ -129,135 +153,169 @@ Serial.println("\n");
   pServer->getAdvertising()->start();
 
   Serial.println("Waiting for a Client to connect...");
-//----------------------------------------------------BME280
-bool status;
-status = bme.begin(0x76); 
-if (!status) {
+  //----------------------------------------------------BME280
+  bool status;
+  status = bme.begin(0x76);
+  if (!status)
+  {
     Serial.println("Could not find a valid BME280 sensor, check wiring!");
-    while (1);
+    while (1)
+      ;
   }
-//----------------------------------------------------Leds
-FastLED.addLeds<WS2812B, DATA_PIN, RGB>(leds, NUM_LEDS);
-FastLED.setBrightness( LUM );
-//-------------Démarage led
-for (int i=0; i <= (NUM_LEDS/2); i++){ 
-  leds[i].setRGB( 0, 3*i,0);
-  leds[NUM_LEDS-i].setRGB( 0,3*i , 0);
-  FastLED.show();
-   delay(20);
-  }
- 
-for (int i=0; i <= 255-Rp; i++){ 
-  fill_solid(leds,NUM_LEDS, CRGB(0, 255-i , 0));
-      FastLED.show();
-  delay(5);
+  //----------------------------------------------------Leds
+  FastLED.addLeds<WS2812B, DATA_PIN_LED, RGB>(leds, NUM_LEDS);
+  FastLED.setBrightness(LUM);
+  //-------------Démarage led
+  for (int i = 0; i <= (NUM_LEDS / 2); i++)
+  {
+    leds[i].setRGB(0, 3 * i, 0);
+    leds[NUM_LEDS - i].setRGB(0, 3 * i, 0);
+    FastLED.show();
+    delay(20);
   }
 
+  for (int i = 0; i <= 255 - Rp; i++)
+  {
+    fill_solid(leds, NUM_LEDS, CRGB(0, 255 - i, 0));
+    FastLED.show();
+    delay(5);
+  }
 }
 
-void loop() {
-  majBME();
-value = temper*100;
-value2 = hum*100;
-value3 = press;
+void loop()
+{
 
-if (deviceConnected) {
-/* Set the value */
-  temperatureCharacteristic.setValue((uint8_t*)&value,2);  // This is a value of a single byte
-  temperatureCharacteristic.notify();  // Notify the client of a change
-  humidityCharacteristic.setValue((uint8_t*)&value2,2);  // This is a value of a single byte
-  humidityCharacteristic.notify();  // Notify the client of a change
-  pressureCharacteristic.setValue((uint8_t*)&value3,2);  // This is a value of a single byte
-  pressureCharacteristic.notify();  // Notify the client of a change
-}
+//Envoie des mesures des capteurs si un client est connecté toute les x secondes (selon param timer)
+  if (deviceConnected && flagMeas == 1)
+  {
+    temperature = bme.readTemperature() * 100;
+    humidity = bme.readHumidity() * 100;
+    pressure = bme.readPressure() * 100;
+
+    Serial.print("Pressure(hPa): ");
+    Serial.println(pressure / 10);
+    Serial.print("Temperature(°C): ");
+    Serial.println(temperature / 100);
+    Serial.print("Humidity(%): ");
+    Serial.println(humidity / 100);
+    Serial.print("VclignoG: ");
+    Serial.println(VclignoG);
+    Serial.print("VclignoD: ");
+    Serial.println(VclignoD);
+    Serial.print("Vstop: ");
+    Serial.println(Vstop);
+    Serial.println("");
+
+    /* Set the value */
+    temperatureCharacteristic.setValue((uint8_t *)&temperature, 2); // This is a value of a single byte
+    temperatureCharacteristic.notify();                             // Notify the client of a change
+    humidityCharacteristic.setValue((uint8_t *)&humidity, 2);       // This is a value of a single byte
+    humidityCharacteristic.notify();                                // Notify the client of a change
+    pressureCharacteristic.setValue((uint8_t *)&pressure, 4);       // This is a value of a single byte
+    pressureCharacteristic.notify();                                // Notify the client of a change
+    flagMeas = 0;
+  }
 
   //Lecture des tensions
-   float v0 = (analogRead(Stop_PIN) * vPow) / 1024.0;
+  float v0 = (analogRead(Stop_PIN) * vPow) / 1024.0;
   Vstop = v0 / (r2 / (r1 + r2));
-   float v1 = (analogRead(ClignoD_PIN) * vPow) / 1024.0;
-    VclignoD = v1 / (r2 / (r1 + r2));
-   float v2 = (analogRead(ClignoG_PIN) * vPow) / 1024.0;
-    VclignoG = v2 / (r2 / (r1 + r2));
-//Feux de positions
-fill_solid(leds,NUM_LEDS, CRGB( 0, Rp, 0));
-        FastLED.show();
-        
-//Warning
-if (VclignoD>8 and VclignoG>8) { 
-   for (int i=0; i <= (NUM_LEDS/2); i++){ 
-    leds[0+i] = CRGB( 69, 255, 0);
-    leds[NUM_LEDS-i] = CRGB( 69, 255, 0);
-    FastLED.show();
-    delay(5);
-    }
-  for (int i=0; i <= (NUM_LEDS/2); i++){ 
-    leds[0+i] = CRGB( 0, Rp, 0);
-    leds[NUM_LEDS-i] = CRGB( 0, Rp, 0);
-    FastLED.show();
-    delay(5);
-    }
-} 
+  float v1 = (analogRead(ClignoD_PIN) * vPow) / 1024.0;
+  VclignoD = v1 / (r2 / (r1 + r2));
+  float v2 = (analogRead(ClignoG_PIN) * vPow) / 1024.0;
+  VclignoG = v2 / (r2 / (r1 + r2));
+  //Mise à jour de R
+  R = (Vstop > 8) ? Rs : Rp;
+  if (strob == 1)
+  {
+    etat = 6; //Strob
+  }
+  else if (VclignoD > 8 and VclignoG > 8)
+  {
+    etat = 1; //Warning
+  }
+  else if (VclignoD > 8 and VclignoG < 8)
+  {
+    etat = 2; //Clignotant D
+  }
+  else if (VclignoG > 8 and VclignoD < 8)
+  {
+    etat = 3; //Clignotants G
+  }
+  else if (Vstop > 8)
+  {
+    etat = 4; //Feu STOP Allumage
+  }
+  else if (Vstop < 8)
+  {
+    etat = 5; //Feu STOP Extinction
+  }
 
-
-//Clignotants 1er moitier
-if (VclignoD>8 and VclignoG<8) { 
-for (int i=0; i <= (NUM_LEDS/2)-1; i++){ 
-    leds[0+i] = CRGB( 69, 255, 0);
+  switch (etat)
+  {
+  case 0:
+    //Feux de positions
+    fill_solid(leds, NUM_LEDS, CRGB(0, Rp, 0));
     FastLED.show();
-    delay(5);
-    }
-  for (int i=0; i <= (NUM_LEDS/2)-1; i++){ 
-    leds[0+i] = CRGB( 0, Rp, 0);
-    FastLED.show();
-    delay(5);
-    }
-} 
-  
-//Clignotants 2em moitier
-if (VclignoG>8 and VclignoD<8) { 
-  for (int i=0; i <= (NUM_LEDS/2); i++){ 
-    leds[NUM_LEDS-i] = CRGB( 69, 255, 0);
-    FastLED.show();
-    delay(5);
-    }
-  for (int i=0; i <= (NUM_LEDS/2); i++){ 
-    leds[NUM_LEDS-i] = CRGB( 0, Rp, 0);
-    FastLED.show();
-    delay(5);
-    }
-} 
-
-//Feu STOP Allumage
-if (Vstop>8) {
-  fill_solid(leds,NUM_LEDS, CRGB( 0, 255, 0));
+    break;
+  case 1:
+    //Warning
+    for (int i = 0; i <= (NUM_LEDS / 2); i++)
+    {
+      leds[0 + i] = CRGB(69, 255, 0);
+      leds[NUM_LEDS - i] = CRGB(69, 255, 0);
       FastLED.show();
-}
-  
-//Feu STOP Extinction
-  if(Vstop<8){
-    fill_solid(leds,NUM_LEDS, CRGB( 0, Rp, 0));
-        FastLED.show();
-        }
-
-//strobe
-if (strob==1) { 
-    for (int p=0; p <= (NUM_LEDS/2); p++){ 
-    leds[NUM_LEDS-p] = CRGB( 0, 0, 255);
+      delay(5);
+    }
+    for (int i = 0; i <= (NUM_LEDS / 2); i++)
+    {
+      leds[0 + i] = CRGB(0, R, 0);
+      leds[NUM_LEDS - i] = CRGB(0, R, 0);
+      FastLED.show();
+      delay(5);
+    }
+    break;
+  case 2:
+    //Clignotants 1er moitier
+    fill_solid(leds, NUM_LEDS, CRGB(0, R, 0));
+    fill_half_grad(1, 255, 69, 0);
+    fill_half_grad(1, R, 0, 0);
+    break;
+  case 3:
+    //Clignotants 2em moitier
+    fill_solid(leds, NUM_LEDS, CRGB(0, R, 0));
+    fill_half_grad(2, 255, 69, 0);
+    fill_half_grad(2, R, 0, 0);
+    break;
+  case 4:
+    //Feu STOP Allumage
+    fill_solid(leds, NUM_LEDS, CRGB(0, R, 0));
+    FastLED.show();
+    break;
+  case 5:
+    //Feu STOP Extinction
+    fill_solid(leds, NUM_LEDS, CRGB(0, R, 0));
+    FastLED.show();
+    break;
+  case 6:
+    //Strob
+    for (int i = 0; i <= (NUM_LEDS / 2); i++)
+    {
+      leds[NUM_LEDS - i] = CRGB(0, 0, 255);
     }
     FastLED.show();
     delay(100);
-    for (int d=0; d <= (NUM_LEDS/2); d++){ 
-    leds[NUM_LEDS-d] = CRGB( 0, 0, 0);
+    for (int i = 0; i <= (NUM_LEDS / 2); i++)
+    {
+      leds[NUM_LEDS - i] = CRGB(0, 0, 0);
     }
     FastLED.show();
     delay(50);
-    fill_solid(leds,NUM_LEDS/2, CRGB( 0, 0, 255));
+    fill_solid(leds, NUM_LEDS / 2, CRGB(0, 0, 255));
     FastLED.show();
     delay(100);
-     fill_solid(leds,NUM_LEDS/2, CRGB( 0, 0, 0));
+    fill_solid(leds, NUM_LEDS / 2, CRGB(0, 0, 0));
     FastLED.show();
     delay(50);
+    break;
+  }
 }
-}
-
-
