@@ -6,17 +6,30 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-#define NUM_LEDS 60     //Nombre de led 88
+//------------------OLED Display-----------------------
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_I2CDevice.h>
+#include <string.h>
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+//--------------------------------------------------------
+#define NUM_LEDS 88     //Nombre de led 88
 #define DATA_PIN_LED 19 //Numéro du pin de données led
 #define LUM 255         //Luminosité led [0;255]
 #define Rp 10           //Intensité rouge feu position [0;255]
 #define Rs 255          //Intensité rouge feu stop [0;255]
-#define ClignoD_PIN 25
-#define ClignoG_PIN 33
+#define ClignoD_PIN 25 
+#define ClignoG_PIN 27
 #define Stop_PIN 32
+#define TriggerValue 30
 
 CRGB leds[NUM_LEDS];
-float vPow = 4.7;     //Tension ADC ref
+float vPow = 3.3;     //Tension ADC ref
 float r1 = 30000;     //Résitance pont1 div
 float r2 = 7500;      //Résitance pont2 div
 float Vstop = 0;      //Tension courante Feu stop
@@ -89,6 +102,7 @@ void fill_half_grad(int Half, uint8_t Red, uint8_t Green, uint8_t Blue)
   }
 }
 //----------------------Timer-----------------------
+//Configuration du timer pour envoie des mesures périodique
 volatile bool flagMeas;
 hw_timer_t *timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -111,6 +125,15 @@ void setup()
   //----------------------------------------------------Serial
   Serial.begin(115200);
   Serial.println("\n");
+  //----------------------------------------------------OLED
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
   //----------------------------------------------------BLE
   // Create the BLE Device
   BLEDevice::init("ESP");
@@ -153,19 +176,23 @@ void setup()
   pServer->getAdvertising()->start();
 
   Serial.println("Waiting for a Client to connect...");
+  
+  display.setCursor(0, 10);
+  display.println("Waiting for a Client to connect...");
+  display.display();
   //----------------------------------------------------BME280
   bool status;
   status = bme.begin(0x76);
-  if (!status)
+  /*if (!status)
   {
     Serial.println("Could not find a valid BME280 sensor, check wiring!");
     while (1)
       ;
-  }
-  //----------------------------------------------------Leds
+  }*/
+  //----------------------LEDS---------------------------
   FastLED.addLeds<WS2812B, DATA_PIN_LED, RGB>(leds, NUM_LEDS);
   FastLED.setBrightness(LUM);
-  //-------------Démarage led
+  //-------------Initialisation LED----------------------
   for (int i = 0; i <= (NUM_LEDS / 2); i++)
   {
     leds[i].setRGB(0, 3 * i, 0);
@@ -192,30 +219,30 @@ void loop()
     humidity = bme.readHumidity() * 100;
     pressure = bme.readPressure() * 100;
 
-    Serial.print("Pressure(hPa): ");
-    Serial.println(pressure / 10);
-    Serial.print("Temperature(°C): ");
-    Serial.println(temperature / 100);
-    Serial.print("Humidity(%): ");
-    Serial.println(humidity / 100);
-    Serial.print("VclignoG: ");
-    Serial.println(VclignoG);
-    Serial.print("VclignoD: ");
-    Serial.println(VclignoD);
-    Serial.print("Vstop: ");
-    Serial.println(Vstop);
-    Serial.println("");
+    //char *numtStr = temperature;
+    //string strTemp = to_string(numStr);
+
+    Serial.printf("Pressure: %.2fhPa Temperature: %d°C Humidity: %d%% \n",pressure / 10,temperature / 100,humidity / 100);
+    Serial.printf("VclignoG: %f VclignoD: %f Vstop: %f \n",VclignoG,VclignoD,Vstop);
 
     /* Set the value */
-    temperatureCharacteristic.setValue((uint8_t *)&temperature, 2); // This is a value of a single byte
+    temperatureCharacteristic.setValue((uint8_t *)&temperature, size_t(2)); // This is a value of a single byte
     temperatureCharacteristic.notify();                             // Notify the client of a change
-    humidityCharacteristic.setValue((uint8_t *)&humidity, 2);       // This is a value of a single byte
+    humidityCharacteristic.setValue((uint8_t *)&humidity, size_t(2));       // This is a value of a single byte
     humidityCharacteristic.notify();                                // Notify the client of a change
-    pressureCharacteristic.setValue((uint8_t *)&pressure, 4);       // This is a value of a single byte
+    pressureCharacteristic.setValue((uint8_t *)&pressure, size_t(4));       // This is a value of a single byte
     pressureCharacteristic.notify();                                // Notify the client of a change
     flagMeas = 0;
   }
-
+  //display.clearDisplay();
+  //display.setCursor(0, 10);
+  //display.println("Temp:");
+  //display.display();
+  
+    Serial.printf("Pressure: $%.2fhPa Temperature: %d°C Humidity: %d%% \n",pressure / 10,temperature / 100,humidity / 100);
+    Serial.printf("VclignoG: $%d %d %d; VclignoD:  Vstop:  \n",(int)VclignoG
+    ,(int)VclignoD,(int)Vstop);
+    delay(10);
   //Lecture des tensions
   float v0 = (analogRead(Stop_PIN) * vPow) / 1024.0;
   Vstop = v0 / (r2 / (r1 + r2));
@@ -224,28 +251,28 @@ void loop()
   float v2 = (analogRead(ClignoG_PIN) * vPow) / 1024.0;
   VclignoG = v2 / (r2 / (r1 + r2));
   //Mise à jour de R
-  R = (Vstop > 8) ? Rs : Rp;
+  R = (Vstop > TriggerValue) ? Rs : Rp;
   if (strob == 1)
   {
     etat = 6; //Strob
   }
-  else if (VclignoD > 8 and VclignoG > 8)
+  else if (VclignoD > TriggerValue and VclignoG > TriggerValue)
   {
     etat = 1; //Warning
   }
-  else if (VclignoD > 8 and VclignoG < 8)
+  else if (VclignoD > TriggerValue and VclignoG < TriggerValue)
   {
     etat = 2; //Clignotant D
   }
-  else if (VclignoG > 8 and VclignoD < 8)
+  else if (VclignoG > TriggerValue and VclignoD < TriggerValue)
   {
     etat = 3; //Clignotants G
   }
-  else if (Vstop > 8)
+  else if (Vstop > TriggerValue)
   {
     etat = 4; //Feu STOP Allumage
   }
-  else if (Vstop < 8)
+  else if (Vstop < TriggerValue)
   {
     etat = 5; //Feu STOP Extinction
   }
